@@ -8,6 +8,27 @@ export class TravelService extends cds.ApplicationService { init() {
   // Reflected definitions from the service's CDS model
   const { today } = cds.builtin.types.Date as unknown as { today(): CdsDate };
 
+  // Reject direct Booking creation without a Travel context
+  this.before(['CREATE', 'NEW'], [Booking, Booking.drafts], req => {
+    if (!req.data.to_Travel && !req.data.to_Travel_TravelUUID) {
+      req.reject(400,
+        'Bookings must be created in the context of a Travel draft. ' +
+        'Use POST /processor/Travel(TravelUUID=<uuid>,IsActiveEntity=false)/to_Booking instead.'
+      )
+    }
+  })
+
+  // Catch DB-layer errors and provide helpful messages
+  this.on('error', (err: any, req: any) => {
+    if (err.message?.includes("association can't be used as a value") ||
+        err.message?.includes('not found in the elements of')) {
+
+      // For composition entities (Booking/Supplement), guide users to the correct path
+      err.message = `Bookings and Supplements cannot be created directly. ` +
+        `Create them via their parent: POST /processor/Travel(TravelUUID=<uuid>,IsActiveEntity=false)/to_Booking`;
+      err.status = 400;
+    }
+  })
 
   // Fill in alternative keys as consecutive numbers for new Travels, Bookings, and Supplements.
   // Note: For Travels that can't be done at NEW events, that is when drafts are created,
@@ -33,8 +54,8 @@ export class TravelService extends cds.ApplicationService { init() {
   // Ensure BeginDate is not before today and not after EndDate.
   this.before ('SAVE', Travel, req => {
     const { BeginDate, EndDate } = req.data
-    if (BeginDate < today()) req.error (400, `Begin Date must not be before today.`, 'in/BeginDate')
-    if (BeginDate > EndDate) req.error (400, `End Date must be after Begin Date.`, 'in/EndDate')
+    if (BeginDate && BeginDate < today()) req.error (400, `Begin Date must not be before today.`, 'in/BeginDate')
+    if (BeginDate && EndDate && BeginDate > EndDate) req.error (400, `End Date must be after Begin Date.`, 'in/EndDate')
   })
 
 
@@ -65,8 +86,8 @@ export class TravelService extends cds.ApplicationService { init() {
    * Trees-for-Tickets: helper to update totals including green flight fee
    */
   async function update_totalsGreen(TravelUUID: string) {
-    const { GoGreen } = await SELECT.one .from(Travel.drafts) .columns('GoGreen') .where({ TravelUUID })
-    if (GoGreen) {
+    const result = await SELECT.one .from(Travel.drafts) .columns('GoGreen') .where({ TravelUUID })
+    if (result?.GoGreen) {
       await UPDATE(Travel.drafts, TravelUUID)
         .set `GreenFee = round(BookingFee * 0.1, 0)`
         .set `TreesPlanted = round(BookingFee * 0.1, 0)`
@@ -102,7 +123,7 @@ export class TravelService extends cds.ApplicationService { init() {
 
     if (!succeeded) { //> let's find out why...
       let travel = await SELECT.one `TravelID as ID, TravelStatus.code as status, BookingFee` .from (req.subject)
-      if (!travel) throw req.reject (404, `Travel "${travel.ID}" does not exist; may have been deleted meanwhile.`)
+      if (!travel) throw req.reject (404, `Travel does not exist; may have been deleted meanwhile.`)
       if (travel.status === TravelStatusCode.Accepted) throw req.reject (400, `Travel "${travel.ID}" has been approved already.`)
       if (travel.BookingFee == null) throw req.reject (404, `No discount possible, as travel "${travel.ID}" does not yet have a booking fee added.`)
     } else return SELECT(req.subject)
